@@ -1,3 +1,5 @@
+#include "util/debug.hpp"
+
 #include "engine/guidance/post_processing.hpp"
 #include "extractor/guidance/turn_instruction.hpp"
 
@@ -315,6 +317,99 @@ void closeOffRoundabout(const bool on_roundabout,
     }
 }
 
+<<<<<<< HEAD
+=======
+// elongate a step by another. the data is added either at the front, or the back
+OSRM_ATTR_WARN_UNUSED
+RouteStep elongate(RouteStep step, const RouteStep &by_step)
+{
+    BOOST_ASSERT(step.mode == by_step.mode);
+
+    step.duration += by_step.duration;
+    step.distance += by_step.distance;
+
+    // by_step comes after step -> we append at the end
+    if (step.geometry_end == by_step.geometry_begin + 1)
+    {
+        step.geometry_end = by_step.geometry_end;
+
+        // if we elongate in the back, we only need to copy the intersections to the beginning.
+        // the bearings remain the same, as the location of the turn doesn't change
+        step.intersections.insert(
+            step.intersections.end(), by_step.intersections.begin(), by_step.intersections.end());
+    }
+    // by_step comes before step -> we append at the front
+    else
+    {
+        BOOST_ASSERT(step.maneuver.waypoint_type == WaypointType::None &&
+                     by_step.maneuver.waypoint_type == WaypointType::None);
+        BOOST_ASSERT(by_step.geometry_end == step.geometry_begin + 1);
+        step.geometry_begin = by_step.geometry_begin;
+
+        // elongating in the front changes the location of the maneuver
+        step.maneuver = by_step.maneuver;
+
+        step.intersections.insert(
+            step.intersections.begin(), by_step.intersections.begin(), by_step.intersections.end());
+    }
+    return step;
+}
+
+bool bearingsAreReversed(const double bearing_in, const double bearing_out)
+{
+    // Nearly perfectly reversed angles have a difference close to 180 degrees (straight)
+    const double left_turn_angle = [&]() {
+        if (0 <= bearing_out && bearing_out <= bearing_in)
+            return bearing_in - bearing_out;
+        return bearing_in + 360 - bearing_out;
+    }();
+    return angularDeviation(left_turn_angle, 180) <= 35;
+}
+
+void collapseUTurn(std::vector<RouteStep> &steps,
+                   const std::size_t two_back_index,
+                   const std::size_t one_back_index,
+                   const std::size_t step_index)
+{
+    BOOST_ASSERT(two_back_index < steps.size());
+    BOOST_ASSERT(step_index < steps.size());
+    BOOST_ASSERT(one_back_index < steps.size());
+    const auto &current_step = steps[step_index];
+    const auto &one_back_step = steps[one_back_index];
+    // the simple case is a u-turn that changes directly into the in-name again
+    const bool direct_u_turn = steps[two_back_index].name_id == current_step.name_id;
+
+    // however, we might also deal with a dual-collapse scenario in which we have to
+    // additionall collapse a name-change as welll
+    const auto next_step_index = step_index + 1;
+    const bool continues_with_name_change =
+        (next_step_index < steps.size()) &&
+        (steps[next_step_index].maneuver.instruction.type == TurnType::UseLane ||
+         isCollapsableInstruction(steps[next_step_index].maneuver.instruction));
+    const bool u_turn_with_name_change =
+        continues_with_name_change && steps[next_step_index].name == steps[two_back_index].name;
+
+    if (direct_u_turn || u_turn_with_name_change)
+    {
+        steps[one_back_index] = elongate(std::move(steps[one_back_index]), steps[step_index]);
+        invalidateStep(steps[step_index]);
+        if (u_turn_with_name_change)
+        {
+            steps[one_back_index] =
+                elongate(std::move(steps[one_back_index]), steps[next_step_index]);
+            invalidateStep(steps[next_step_index]); // will be skipped due to the
+                                                    // continue statement at the
+                                                    // beginning of this function
+        }
+
+        steps[one_back_index].name = steps[two_back_index].name;
+        steps[one_back_index].name_id = steps[two_back_index].name_id;
+        steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
+        steps[one_back_index].maneuver.instruction.direction_modifier = DirectionModifier::UTurn;
+    }
+}
+
+>>>>>>> 8603665... collapse u-turn at turn-lane
 void collapseTurnAt(std::vector<RouteStep> &steps,
                     const std::size_t two_back_index,
                     const std::size_t one_back_index,
@@ -325,6 +420,7 @@ void collapseTurnAt(std::vector<RouteStep> &steps,
     const auto &current_step = steps[step_index];
     const auto &one_back_step = steps[one_back_index];
 
+<<<<<<< HEAD
     // FIXME: this function assumes driving on the right hand side of the streat
     const auto bearingsAreReversed = [](const double bearing_in, const double bearing_out) {
         // Nearly perfectly reversed angles have a difference close to 180 degrees (straight)
@@ -336,6 +432,9 @@ void collapseTurnAt(std::vector<RouteStep> &steps,
         return angularDeviation(left_turn_angle, 180) <= 35;
     };
 
+=======
+    // This function assumes driving on the right hand side of the streat
+>>>>>>> 8603665... collapse u-turn at turn-lane
     BOOST_ASSERT(!one_back_step.intersections.empty() && !current_step.intersections.empty());
 
     if (!hasManeuver(one_back_step, current_step))
@@ -439,39 +538,7 @@ void collapseTurnAt(std::vector<RouteStep> &steps,
                                      .bearings[current_step.intersections.front().out]) &&
              compatible(one_back_step, current_step))
     {
-        BOOST_ASSERT(two_back_index < steps.size());
-        // the simple case is a u-turn that changes directly into the in-name again
-        const bool direct_u_turn = steps[two_back_index].name == current_step.name;
-
-        // however, we might also deal with a dual-collapse scenario in which we have to
-        // additionall collapse a name-change as welll
-        const auto next_step_index = step_index + 1;
-        const bool continues_with_name_change =
-            (next_step_index < steps.size()) &&
-            (steps[next_step_index].maneuver.instruction.type == TurnType::UseLane ||
-             isCollapsableInstruction(steps[next_step_index].maneuver.instruction));
-        const bool u_turn_with_name_change =
-            continues_with_name_change && steps[next_step_index].name == steps[two_back_index].name;
-
-        if (direct_u_turn || u_turn_with_name_change)
-        {
-            steps[one_back_index] = elongate(std::move(steps[one_back_index]), steps[step_index]);
-            invalidateStep(steps[step_index]);
-            if (u_turn_with_name_change)
-            {
-                steps[one_back_index] =
-                    elongate(std::move(steps[one_back_index]), steps[next_step_index]);
-                invalidateStep(steps[next_step_index]); // will be skipped due to the
-                                                        // continue statement at the
-                                                        // beginning of this function
-            }
-
-            steps[one_back_index].name = steps[two_back_index].name;
-            steps[one_back_index].name_id = steps[two_back_index].name_id;
-            steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
-            steps[one_back_index].maneuver.instruction.direction_modifier =
-                DirectionModifier::UTurn;
-        }
+        collapseUTurn(steps, two_back_index, one_back_index, step_index);
     }
 }
 
@@ -689,6 +756,7 @@ std::vector<RouteStep> postProcess(std::vector<RouteStep> steps)
 // Post Processing to collapse unnecessary sets of combined instructions into a single one
 std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
 {
+    util::guidance::print(steps);
     if (steps.size() <= 2)
         return steps;
 
@@ -828,6 +896,7 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                    isCollapsableInstruction(one_back_step.maneuver.instruction)) ||
                   isStaggeredIntersection(one_back_step, current_step)))
         {
+            std::cout << "A" << std::endl;
             const auto two_back_index = getPreviousIndex(one_back_index);
             BOOST_ASSERT(two_back_index < steps.size());
             // valid, since one_back is collapsable or a turn and therefore not depart:
@@ -885,10 +954,23 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
         else if (one_back_index > 0 && (one_back_step.distance <= MAX_COLLAPSE_DISTANCE ||
                                         choiceless(current_step, one_back_step)))
         {
+            std::cout << "B" << std::endl;
             // check for one of the multiple collapse scenarios and, if possible, collapse the turn
             const auto two_back_index = getPreviousIndex(one_back_index);
             BOOST_ASSERT(two_back_index < steps.size());
             collapseTurnAt(steps, two_back_index, one_back_index, step_index);
+        }
+        else if (one_back_index > 0 &&
+                 (current_step.name_id != EMPTY_NAMEID &&
+                  steps[getPreviousIndex(one_back_index)].name_id == current_step.name_id) &&
+                 bearingsAreReversed(util::bearing::reverseBearing(
+                                         one_back_step.intersections.front()
+                                             .bearings[one_back_step.intersections.front().in]),
+                                     current_step.intersections.front()
+                                         .bearings[current_step.intersections.front().out]) &&
+                 compatible(one_back_step, current_step))
+        {
+            collapseUTurn(steps, getPreviousIndex(one_back_index), one_back_index, step_index);
         }
     }
 
