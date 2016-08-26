@@ -317,8 +317,6 @@ void closeOffRoundabout(const bool on_roundabout,
     }
 }
 
-<<<<<<< HEAD
-=======
 // elongate a step by another. the data is added either at the front, or the back
 OSRM_ATTR_WARN_UNUSED
 RouteStep elongate(RouteStep step, const RouteStep &by_step)
@@ -372,6 +370,53 @@ bool isLinkroad(const RouteStep &step)
     return step.distance <= MAX_LINK_ROAD_LENGTH && step.name_id == EMPTY_NAMEID;
 }
 
+double findTotalTurnAngle(const RouteStep &one_back_step, const RouteStep &current_step)
+{
+    const auto exit_intersection = current_step.intersections.front();
+    const auto current_step_exit_bearing = exit_intersection.bearings[exit_intersection.out];
+    const auto current_step_entry_bearing =
+        util::bearing::reverseBearing(exit_intersection.bearings[exit_intersection.in]);
+
+    const auto entry_intersection = one_back_step.intersections.front();
+    const auto one_back_step_entry_bearing =
+        util::bearing::reverseBearing(entry_intersection.bearings[entry_intersection.in]);
+    const auto one_back_step_exit_bearing = entry_intersection.bearings[entry_intersection.out];
+
+    const auto current_angle = turn_angle(current_step_entry_bearing, current_step_exit_bearing);
+    const auto one_back_angle = turn_angle(one_back_step_entry_bearing, one_back_step_exit_bearing);
+
+    if ((one_back_angle < 180 && current_angle < 180) ||
+        (one_back_angle > 180 && current_angle > 180))
+    {
+        // both angles are in the same direction, the total turn gets increased
+        //
+        // a ---- b
+        //           \
+        //              c
+        //              |
+        //              d
+        //
+        // Will be considered just like
+        // a -----b
+        //        |
+        //        c
+        //        |
+        //        d
+        const double total_angle =
+            turn_angle(one_back_step_entry_bearing, current_step_exit_bearing);
+        return total_angle;
+    }
+    else
+    {
+        // to prevent ignoring angles like
+        // a -- b
+        //      |
+        //      c -- d
+        // We don't combine both turn angles here but keep the very first turn angle
+        return one_back_angle;
+    }
+}
+
 void collapseUTurn(std::vector<RouteStep> &steps,
                    const std::size_t two_back_index,
                    const std::size_t one_back_index,
@@ -414,33 +459,16 @@ void collapseUTurn(std::vector<RouteStep> &steps,
     }
 }
 
->>>>>>> 8603665... collapse u-turn at turn-lane
 void collapseTurnAt(std::vector<RouteStep> &steps,
                     const std::size_t two_back_index,
                     const std::size_t one_back_index,
                     const std::size_t step_index)
 {
-    std::cout << "Collapsing at: " << step_index << std::endl;
     BOOST_ASSERT(step_index < steps.size());
     BOOST_ASSERT(one_back_index < steps.size());
     const auto &current_step = steps[step_index];
     const auto &one_back_step = steps[one_back_index];
 
-<<<<<<< HEAD
-    // FIXME: this function assumes driving on the right hand side of the streat
-    const auto bearingsAreReversed = [](const double bearing_in, const double bearing_out) {
-        // Nearly perfectly reversed angles have a difference close to 180 degrees (straight)
-        const double left_turn_angle = [&]() {
-            if (0 <= bearing_out && bearing_out <= bearing_in)
-                return bearing_in - bearing_out;
-            return bearing_in + 360 - bearing_out;
-        }();
-        return angularDeviation(left_turn_angle, 180) <= 35;
-    };
-
-=======
-    // This function assumes driving on the right hand side of the streat
->>>>>>> 8603665... collapse u-turn at turn-lane
     BOOST_ASSERT(!one_back_step.intersections.empty() && !current_step.intersections.empty());
 
     if (!hasManeuver(one_back_step, current_step))
@@ -488,55 +516,64 @@ void collapseTurnAt(std::vector<RouteStep> &steps,
     }
     // very short segment after turn
     else if ((one_back_step.distance <= MAX_COLLAPSE_DISTANCE || isLinkroad(one_back_step)) &&
-             isCollapsableInstruction(current_step.maneuver.instruction))
+             isCollapsableInstruction(current_step.maneuver.instruction) &&
+             compatible(one_back_step, current_step))
     {
         // TODO check for lanes (https://github.com/Project-OSRM/osrm-backend/issues/2553)
-        if (compatible(one_back_step, current_step))
+        steps[one_back_index] = elongate(std::move(steps[one_back_index]), steps[step_index]);
+        if ((TurnType::Continue == one_back_step.maneuver.instruction.type ||
+             TurnType::Suppressed == one_back_step.maneuver.instruction.type) &&
+            current_step.name_id != steps[two_back_index].name_id)
         {
-            steps[one_back_index] = elongate(std::move(steps[one_back_index]), steps[step_index]);
-            if ((TurnType::Continue == one_back_step.maneuver.instruction.type ||
-                 TurnType::Suppressed == one_back_step.maneuver.instruction.type) &&
-                current_step.name_id != steps[two_back_index].name_id)
-                steps[one_back_index].maneuver.instruction.type = TurnType::Turn;
-            else if (TurnType::Turn == one_back_step.maneuver.instruction.type &&
-                     current_step.name_id == steps[two_back_index].name_id)
-            {
-                steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
+            steps[one_back_index].maneuver.instruction.type = TurnType::Turn;
+        }
+        else if (TurnType::Turn == one_back_step.maneuver.instruction.type &&
+                 current_step.name_id == steps[two_back_index].name_id)
+        {
+            steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
 
-                const auto getBearing = [](bool in, const RouteStep &step) {
-                    const auto index =
-                        in ? step.intersections.front().in : step.intersections.front().out;
-                    return step.intersections.front().bearings[index];
-                };
+            const auto getBearing = [](bool in, const RouteStep &step) {
+                const auto index =
+                    in ? step.intersections.front().in : step.intersections.front().out;
+                return step.intersections.front().bearings[index];
+            };
 
-                // If we Merge onto the same street, we end up with a u-turn in some cases
-                if (bearingsAreReversed(
-                        util::bearing::reverseBearing(getBearing(true, one_back_step)),
-                        getBearing(false, current_step)))
-                {
-                    steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
-                    steps[one_back_index].maneuver.instruction.direction_modifier =
-                        DirectionModifier::UTurn;
-                }
-            }
-            else if (TurnType::Merge == one_back_step.maneuver.instruction.type &&
-                     current_step.maneuver.instruction.type !=
-                         TurnType::Suppressed) // This suppressed is a check for highways. We might
-                                               // need a highway-suppressed to get the turn onto a
-                                               // highway...
+            // If we Merge onto the same street, we end up with a u-turn in some cases
+            if (bearingsAreReversed(util::bearing::reverseBearing(getBearing(true, one_back_step)),
+                                    getBearing(false, current_step)))
             {
                 steps[one_back_index].maneuver.instruction.direction_modifier =
-                    util::guidance::mirrorDirectionModifier(
-                        steps[one_back_index].maneuver.instruction.direction_modifier);
+                    DirectionModifier::UTurn;
             }
-            steps[one_back_index].name = current_step.name;
-            steps[one_back_index].name_id = current_step.name_id;
-            invalidateStep(steps[step_index]);
         }
+
+        if (TurnType::Merge == one_back_step.maneuver.instruction.type &&
+            current_step.maneuver.instruction.type !=
+                TurnType::Suppressed) // This suppressed is a check for highways. We might
+                                      // need a highway-suppressed to get the turn onto a
+                                      // highway...
+        {
+            steps[one_back_index].maneuver.instruction.direction_modifier =
+                util::guidance::mirrorDirectionModifier(
+                    steps[one_back_index].maneuver.instruction.direction_modifier);
+        }
+        //on non merge-types, we check for a combined turn angle
+        else if( TurnType::Merge != one_back_step.maneuver.instruction.type )
+        {
+            const auto combined_angle = findTotalTurnAngle(one_back_step, current_step);
+            steps[one_back_index].maneuver.instruction.direction_modifier =
+                getTurnDirection(combined_angle);
+        }
+
+        steps[one_back_index].name = current_step.name;
+        steps[one_back_index].name_id = current_step.name_id;
+        invalidateStep(steps[step_index]);
     }
     // Potential U-Turn
     else if ((one_back_step.distance <= MAX_COLLAPSE_DISTANCE ||
-              choiceless(current_step, one_back_step)) &&
+              choiceless(current_step, one_back_step) ||
+              (isLinkroad(one_back_step) && current_step.name_id != EMPTY_NAMEID &&
+               steps[two_back_index].name_id == current_step.name_id)) &&
              bearingsAreReversed(util::bearing::reverseBearing(
                                      one_back_step.intersections.front()
                                          .bearings[one_back_step.intersections.front().in]),
@@ -863,14 +900,7 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                     steps[one_back_index].intersections.front().lane_description =
                         current_step.intersections.front().lane_description;
 
-                    const auto exit_intersection = steps[step_index].intersections.front();
-                    const auto exit_bearing = exit_intersection.bearings[exit_intersection.out];
-
-                    const auto entry_intersection = steps[one_back_index].intersections.front();
-                    const auto entry_bearing = entry_intersection.bearings[entry_intersection.in];
-
-                    const double angle =
-                        turn_angle(util::bearing::reverseBearing(entry_bearing), exit_bearing);
+                    const auto angle = findTotalTurnAngle(one_back_step, current_step);
                     steps[one_back_index].maneuver.instruction.direction_modifier =
                         ::osrm::util::guidance::getTurnDirection(angle);
                     invalidateStep(steps[step_index]);
@@ -902,7 +932,6 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                    isCollapsableInstruction(one_back_step.maneuver.instruction)) ||
                   isStaggeredIntersection(one_back_step, current_step)))
         {
-            std::cout << "A" << std::endl;
             const auto two_back_index = getPreviousIndex(one_back_index);
             BOOST_ASSERT(two_back_index < steps.size());
             // valid, since one_back is collapsable or a turn and therefore not depart:
@@ -957,17 +986,17 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                 collapseTurnAt(steps, two_back_index, one_back_index, step_index);
             }
         }
-        else if (one_back_index > 0 && (one_back_step.distance <= MAX_COLLAPSE_DISTANCE ||
-                                        choiceless(current_step, one_back_step)))
+        else if (one_back_index > 0 &&
+                 (one_back_step.distance <= MAX_COLLAPSE_DISTANCE ||
+                  choiceless(current_step, one_back_step) || isLinkroad(one_back_step)))
         {
-            std::cout << "B" << std::endl;
             // check for one of the multiple collapse scenarios and, if possible, collapse the turn
             const auto two_back_index = getPreviousIndex(one_back_index);
             BOOST_ASSERT(two_back_index < steps.size());
             collapseTurnAt(steps, two_back_index, one_back_index, step_index);
         }
         else if (one_back_index > 0 &&
-                 (current_step.name_id != EMPTY_NAMEID &&
+                 (current_step.name_id != EMPTY_NAMEID && isLinkroad(one_back_step) &&
                   steps[getPreviousIndex(one_back_index)].name_id == current_step.name_id) &&
                  bearingsAreReversed(util::bearing::reverseBearing(
                                          one_back_step.intersections.front()
