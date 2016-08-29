@@ -208,7 +208,7 @@ Intersection IntersectionGenerator::GetConnectedRoads(const NodeID from_node,
     BOOST_ASSERT(intersection[0].turn.angle >= 0. &&
                  intersection[0].turn.angle < std::numeric_limits<double>::epsilon());
 
-    if (print || true)
+    if (print)
     {
         std::cout << "[intersection]\n";
         for (auto road : intersection)
