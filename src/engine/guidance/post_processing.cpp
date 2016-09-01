@@ -426,10 +426,22 @@ double findTotalTurnAngle(const RouteStep &entry_step, const RouteStep &exit_ste
         //      |
         //      c -- d
         // We don't combine both turn angles here but keep the very first turn angle.
-        // We choose the first one, since we consider the first maneuver in a merge range the important one
+        // We choose the first one, since we consider the first maneuver in a merge range the
+        // important one
         return entry_angle;
     }
 }
+
+std::size_t getPreviousIndex(std::size_t index, const std::vector<RouteStep> &steps)
+{
+    BOOST_ASSERT(index > 0);
+    BOOST_ASSERT(index < steps.size());
+    --index;
+    while (index > 0 && steps[index].maneuver.instruction.type == TurnType::NoTurn)
+        --index;
+
+    return index;
+};
 
 void collapseUTurn(std::vector<RouteStep> &steps,
                    const std::size_t two_back_index,
@@ -811,17 +823,6 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
     if (steps.size() <= 2)
         return steps;
 
-    // Get the previous non-invalid instruction
-    const auto getPreviousIndex = [&steps](std::size_t index) {
-        BOOST_ASSERT(index > 0);
-        BOOST_ASSERT(index < steps.size());
-        --index;
-        while (index > 0 && steps[index].maneuver.instruction.type == TurnType::NoTurn)
-            --index;
-
-        return index;
-    };
-
     const auto getPreviousNameIndex = [&steps](std::size_t index) {
         BOOST_ASSERT(index > 0);
         BOOST_ASSERT(index < steps.size());
@@ -852,7 +853,7 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
         const auto next_step_index = step_index + 1;
         if (current_step.maneuver.instruction.type == TurnType::NoTurn)
             continue;
-        const auto one_back_index = getPreviousIndex(step_index);
+        const auto one_back_index = getPreviousIndex(step_index, steps);
         BOOST_ASSERT(one_back_index < steps.size());
 
         const auto &one_back_step = steps[one_back_index];
@@ -884,6 +885,16 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
             else
             {
                 // Handle possible u-turns between highways that look like slip-roads
+                if (steps[getPreviousIndex(one_back_index, steps)].name_id ==
+                        steps[step_index].name_id &&
+                    steps[step_index].name_id != EMPTY_NAMEID)
+                {
+                    steps[one_back_index].maneuver.instruction.type = TurnType::Continue;
+                }
+                else
+                {
+                    steps[one_back_index].maneuver.instruction.type = TurnType::Turn;
+                }
                 if (compatible(one_back_step, current_step))
                 {
                     // Turn Types in the response depend on whether we find the same road name
@@ -940,7 +951,7 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                    isCollapsableInstruction(one_back_step.maneuver.instruction)) ||
                   isStaggeredIntersection(one_back_step, current_step)))
         {
-            const auto two_back_index = getPreviousIndex(one_back_index);
+            const auto two_back_index = getPreviousIndex(one_back_index, steps);
             BOOST_ASSERT(two_back_index < steps.size());
             // valid, since one_back is collapsable or a turn and therefore not depart:
             const auto &coming_from_name = steps[two_back_index].name;
@@ -989,7 +1000,7 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
             {
                 // check for one of the multiple collapse scenarios and, if possible, collapse the
                 // turn
-                const auto two_back_index = getPreviousIndex(one_back_index);
+                const auto two_back_index = getPreviousIndex(one_back_index, steps);
                 BOOST_ASSERT(two_back_index < steps.size());
                 collapseTurnAt(steps, two_back_index, one_back_index, step_index);
             }
@@ -999,14 +1010,16 @@ std::vector<RouteStep> collapseTurns(std::vector<RouteStep> steps)
                   choiceless(current_step, one_back_step) || isLinkroad(one_back_step)))
         {
             // check for one of the multiple collapse scenarios and, if possible, collapse the turn
-            const auto two_back_index = getPreviousIndex(one_back_index);
+            const auto two_back_index = getPreviousIndex(one_back_index, steps);
             BOOST_ASSERT(two_back_index < steps.size());
             collapseTurnAt(steps, two_back_index, one_back_index, step_index);
         }
-        else if (one_back_index > 0 &&
-                 isUTurn(one_back_step, current_step, steps[getPreviousIndex(one_back_index)]))
+        else if (one_back_index > 0 && isUTurn(one_back_step,
+                                               current_step,
+                                               steps[getPreviousIndex(one_back_index, steps)]))
         {
-            collapseUTurn(steps, getPreviousIndex(one_back_index), one_back_index, step_index);
+            collapseUTurn(
+                steps, getPreviousIndex(one_back_index, steps), one_back_index, step_index);
         }
     }
 
@@ -1358,16 +1371,6 @@ std::vector<RouteStep> collapseUseLane(std::vector<RouteStep> steps)
         return (mask & tag) != extractor::guidance::TurnLaneType::empty;
     };
 
-    const auto getPreviousIndex = [&steps](std::size_t index) {
-        BOOST_ASSERT(index > 0);
-        BOOST_ASSERT(index < steps.size());
-        --index;
-        while (index > 0 && steps[index].maneuver.instruction.type == TurnType::NoTurn)
-            --index;
-
-        return index;
-    };
-
     const auto canCollapeUseLane =
         [containsTag](const util::guidance::LaneTupel lanes,
                       extractor::guidance::TurnLaneDescription lane_description) {
@@ -1396,8 +1399,8 @@ std::vector<RouteStep> collapseUseLane(std::vector<RouteStep> steps)
             canCollapeUseLane(step.intersections.front().lanes,
                               step.intersections.front().lane_description))
         {
-            const auto previous = getPreviousIndex(step_index);
-            steps[previous] = elongate(std::move(steps[previous]), steps[step_index]);
+            const auto previous = getPreviousIndex(step_index, steps);
+            steps[previous] = elongate(steps[previous], steps[step_index]);
             // elongate(steps[step_index-1], steps[step_index]);
             invalidateStep(steps[step_index]);
         }
